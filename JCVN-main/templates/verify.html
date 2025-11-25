@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+{% block title %}Verify Data | JCVN OCR{% endblock %}
+
+{% block extra_styles %}
+<style>
+    .card-header { background-color: #17a2b8; color: white; font-weight: 600; }
+    .response-block {
+        background-color: #23272f;
+        padding: 15px;
+        border-radius: 8px;
+        font-family: "JetBrains Mono", "Courier New", Courier, monospace;
+        white-space: pre-wrap;
+        word-break: break-all;
+        margin-top: 1rem;
+        font-size: 1rem;
+    }
+    .verified-true { color: #28a745; }
+    .verified-false { color: #dc3545; }
+    .loader {
+        border: 5px solid #f3f3f3;
+        border-top: 5px solid #17a2b8;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        animation: spin 1s linear infinite;
+        margin: 20px auto;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .img-fluid {
+        max-height: 70vh;
+        object-fit: contain;
+        border-radius: 8px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-stamp"></i> Verify Document Authenticity</h2>
+    </div>
+    <div class="card-body">
+        
+        <div id="upload-section">
+            <p class="text-muted">Upload the certificate and its template to extract the data for verification.</p>
+            <div class="form-group">
+                <label for="certificateImageUpload"><strong>1. Upload Certificate Image</strong></label>
+                <div class="custom-file">
+                    <input type="file" id="certificateImageUpload" accept="image/*" class="custom-file-input" required>
+                    <label class="custom-file-label" for="certificateImageUpload">Choose certificate...</label>
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="serverTemplateSelect"><strong>2. Select a Saved Template</strong></label>
+                <select class="custom-select" id="serverTemplateSelect">
+                    <option value="" selected>-- Select a Template --</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="templateUpload">Or upload a JSON Template</label>
+                <div class="custom-file">
+                     <input type="file" id="templateUpload" accept=".json" class="custom-file-input" required>
+                     <label class="custom-file-label" for="templateUpload">Choose template...</label>
+                </div>
+            </div>
+            <button type="button" class="btn btn-info btn-block" onclick="runOcrForVerification()">
+                <i class="fas fa-cogs"></i> 3. Extract Data for Verification
+            </button>
+            <div id="ocr-loader" class="text-center" style="display: none;">
+                <div class="loader"></div>
+                <p>Running OCR on certificate...</p>
+            </div>
+        </div>
+
+        <div id="verification-section" class="mt-4" style="display: none;">
+            <h4>4. Review and Verify Data</h4>
+            <p class="text-muted small">Correct any OCR errors in the form below, then click "Verify on Blockchain" to check for the record's authenticity.</p>
+            <div class="row">
+                <div class="col-md-7">
+                    <h5 id="image-filename" class="text-center text-primary mb-2"></h5>
+                    <img id="certificate-preview" src="" alt="Certificate Preview" class="img-fluid border bg-light">
+                </div>
+                <div class="col-md-5">
+                    <form id="edit-data-form"></form>
+                </div>
+            </div>
+            <button type="button" class="btn btn-success btn-block mt-4" onclick="submitForFinalCheck()">
+                <i class="fas fa-check-double"></i> 5. Verify on Blockchain
+            </button>
+            <div id="final-check-loader" class="text-center" style="display: none;">
+                <div class="loader"></div>
+                <p>Generating Merkle root and checking blockchain...</p>
+            </div>
+            <div id="final-result-container" class="mt-3"></div>
+        </div>
+
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    fetchAndPopulateTemplates();
+});
+
+async function fetchAndPopulateTemplates() {
+    const select = document.getElementById('serverTemplateSelect');
+    try {
+        const response = await fetch("{{ url_for('list_templates') }}");
+        if (!response.ok) throw new Error("Failed to fetch templates.");
+        const templates = await response.json();
+        templates.forEach(name => {
+            const option = document.createElement('option');
+            option.value = name;
+            option.textContent = name;
+            select.appendChild(option);
+        });
+    } catch (error) {
+        console.error("Error fetching templates:", error);
+    }
+}
+
+async function getTemplateFile() {
+    const serverTemplateSelect = document.getElementById('serverTemplateSelect');
+    const templateUpload = document.getElementById('templateUpload');
+    if (serverTemplateSelect.value) {
+        try {
+            const response = await fetch(`{{ url_for('list_templates') }}/${serverTemplateSelect.value}`);
+            if (!response.ok) throw new Error(`Failed to fetch template '${serverTemplateSelect.value}'`);
+            const templateJson = await response.json();
+            const blob = new Blob([JSON.stringify(templateJson)], { type: 'application/json' });
+            return new File([blob], `${serverTemplateSelect.value}.json`, { type: 'application/json' });
+        } catch (error) {
+            alert(error.message);
+            return null;
+        }
+    } else if (templateUpload.files.length > 0) {
+        return templateUpload.files[0];
+    }
+    return null;
+}
+
+async function runOcrForVerification() {
+    const imageFile = document.getElementById('certificateImageUpload').files[0];
+    const templateFile = await getTemplateFile();
+    const ocrLoader = document.getElementById('ocr-loader');
+    
+    // Clear previous results
+    $('#verification-section').hide();
+    $('#final-result-container').html('');
+
+    if (!imageFile || !templateFile) {
+        alert("Please upload a certificate image and select/upload a template.");
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('image', imageFile);
+    formData.append('template', templateFile);
+
+    ocrLoader.style.display = 'block';
+
+    try {
+        const response = await fetch("{{ url_for('ocr_for_verification') }}", {
+            method: 'POST',
+            body: formData
+        });
+        const res = await response.json();
+        ocrLoader.style.display = 'none';
+
+        if (!response.ok) {
+            throw new Error(res.error || "An unknown error occurred during OCR.");
+        }
+
+        displayVerificationUI(res);
+
+    } catch (error) {
+        ocrLoader.style.display = 'none';
+        alert(`Error during OCR step: ${error.message}`);
+    }
+}
+
+function displayVerificationUI(data) {
+    const verificationSection = document.getElementById('verification-section');
+    const form = document.getElementById('edit-data-form');
+    const preview = document.getElementById('certificate-preview');
+    const filename = document.getElementById('image-filename');
+
+    form.innerHTML = ''; // Clear previous form
+    for (const [key, value] of Object.entries(data.data)) {
+        const div = document.createElement('div');
+        div.className = 'form-group';
+        div.innerHTML = `
+            <label for="field-${key}" class="font-weight-bold">${escapeHtml(key)}</label>
+            <input type="text" class="form-control" id="field-${key}" name="${key}" value="${escapeHtml(value)}">
+        `;
+        form.appendChild(div);
+    }
+    
+    filename.textContent = escapeHtml(data.image_name);
+    preview.src = `data:${data.image_mime};base64,${data.image_base64}`;
+    verificationSection.style.display = 'block';
+}
+
+async function submitForFinalCheck() {
+    const form = document.getElementById('edit-data-form');
+    const loader = document.getElementById('final-check-loader');
+    const resultContainer = document.getElementById('final-result-container');
+    const formData = new FormData(form);
+    const dataToVerify = Object.fromEntries(formData.entries());
+
+    resultContainer.innerHTML = '';
+    loader.style.display = 'block';
+
+    try {
+        const response = await fetch("{{ url_for('check_data_on_chain') }}", {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(dataToVerify)
+        });
+        const res = await response.json();
+        loader.style.display = 'none';
+
+        if (!response.ok) {
+            throw new Error(res.error || `HTTP error! Status: ${response.status}`);
+        }
+        
+        // Use modern SVG icons for a more visually appealing result
+        const successIcon = `<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="16" fill="#28a745"/><path d="M10 17.5L15 22L22 12" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+        const failIcon = `<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="16" fill="#dc3545"/><path d="M11 11L21 21M21 11L11 21" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>`;
+        const resultHtml = `
+            <div style="padding: 1.5rem 1.2rem; border-radius: 10px; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,0.07); border: 1px solid #e3e6ed;">
+                <div style="display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.7rem;">
+                    <span style="display: flex; align-items: center;">${res.is_on_chain ? successIcon : failIcon}</span>
+                    <span style="font-size: 1.2rem; font-weight: 600; letter-spacing: 0.5px; ${res.is_on_chain ? 'color: #28a745;' : 'color: #dc3545;'}">
+                        ${res.is_on_chain ? 'Verification Successful' : 'Verification Failed'}
+                    </span>
+                </div>
+                <div style="margin-bottom: 0.7rem; color: #23272f; font-size: 1.05rem;">
+                    ${escapeHtml(res.message)}
+                </div>
+                <div style="margin-top: 1.1rem;">
+                    <div style="font-size: 0.98rem; color: #6c757d; margin-bottom: 0.2rem;">Generated Merkle Root:</div>
+                    <div style="font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 0.97rem; background: #f8f9fa; border-radius: 6px; padding: 0.6rem 0.7rem; word-break: break-all; border: 1px solid #e3e6ed;">
+                        ${escapeHtml(res.generated_merkle_root || 'N/A')}
+                    </div>
+                </div>
+            </div>
+        `;
+        resultContainer.innerHTML = resultHtml;
+
+    } catch (error) {
+        loader.style.display = 'none';
+        const failIcon = `<svg width=\"32\" height=\"32\" viewBox=\"0 0 32 32\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"16\" cy=\"16\" r=\"16\" fill=\"#dc3545\"/><path d=\"M11 11L21 21M21 11L11 21\" stroke=\"#fff\" stroke-width=\"2.5\" stroke-linecap=\"round\"/></svg>`;
+        resultContainer.innerHTML = `
+            <div style=\"padding: 1.5rem 1.2rem; border-radius: 10px; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,0.07); border: 1px solid #e3e6ed;\">
+                <div style=\"display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.7rem;\">
+                    <span style=\"display: flex; align-items: center;\">${failIcon}</span>
+                    <span style=\"font-size: 1.2rem; font-weight: 600; color: #dc3545;\">
+                        Error during verification
+                    </span>
+                </div>
+                <div style=\"color: #23272f; font-size: 1.05rem;\">
+                    ${escapeHtml(error.message)}
+                </div>
+            </div>
+        `;
+    }
+}
+
+function escapeHtml(unsafe) {
+    if (typeof unsafe !== 'string') return unsafe;
+    return unsafe
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+$('.custom-file-input').on('change', function() {
+    let fileName = $(this).val().split('\\').pop();
+    $(this).next('.custom-file-label').addClass("selected").html(fileName);
+});
+</script>
+{% endblock %}

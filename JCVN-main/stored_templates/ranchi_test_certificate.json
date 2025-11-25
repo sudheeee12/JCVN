@@ -1,0 +1,24 @@
+{
+    "fields": [
+        {
+            "name": "Name",
+            "type": "single_line",
+            "coords": [
+                378,
+                401,
+                828,
+                447
+            ]
+        },
+        {
+            "name": "Date",
+            "type": "date",
+            "coords": [
+                627,
+                590,
+                737,
+                612
+            ]
+        }
+    ]
+}

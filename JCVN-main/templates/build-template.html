@@ -1,0 +1,442 @@
+{% extends "base.html" %}
+{% block title %}Build Template | JCVN OCR{% endblock %}
+
+{% block extra_styles %}
+<style>
+    .card-header { background-color: #007bff; color: white; font-weight: 600; }
+    canvas { border: 2px dashed #ced4da; border-radius: 8px; cursor: crosshair; max-width: 100%; height: auto; }
+    #field-list-section { background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); padding: 1.5rem; margin-top: 2rem; }
+    .field-list-item { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1.25rem; margin-bottom: -1px; background-color: #f8f9fa; border: 1px solid rgba(0,0,0,.125); }
+    .field-list-item:first-child { border-top-left-radius: 10px; border-top-right-radius: 10px; }
+    .field-list-item:last-child { border-bottom-right-radius: 10px; border-bottom-left-radius: 10px; }
+    .delete-btn { font-size: 0.8rem; padding: 0.25rem 0.5rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-drafting-compass"></i> Build Template</h2>
+    </div>
+    <div class="card-body">
+        <div class="form-group">
+            <label for="imageUpload">1. Upload a sample certificate image:</label>
+            <div class="custom-file">
+                <input type="file" id="imageUpload" accept="image/*" class="custom-file-input">
+                <label class="custom-file-label" for="imageUpload">Choose file...</label>
+            </div>
+        </div>
+        <p class="text-muted">2. Click and drag to define data fields. To adjust, click a corner of an existing field.</p>
+        <canvas id="canvas"></canvas>
+        <div class="text-center mt-3">
+            <button class="btn btn-primary mr-2" onclick="toggleFieldList()">
+                <i class="fas fa-list"></i> Defined Fields
+            </button>
+            <button class="btn btn-info mr-2" onclick="saveTemplateToServer()">
+                <i class="fas fa-server"></i> Save Template to Server
+            </button>
+            <button class="btn btn-success" onclick="saveTemplate()">
+                <i class="fas fa-save"></i> 3. Download Template File
+            </button>
+        </div>
+    </div>
+</div>
+
+<div id="field-list-section" style="display: none;">
+    <h4 class="mb-3">Defined Fields</h4>
+    <p class="text-muted small" id="field-count">0 fields defined.</p>
+    <div id="field-list-container">
+    </div>
+</div>
+
+<div class="modal fade" id="fieldModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title">Define Field</h5></div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="fieldName">Field Name</label>
+                    <input type="text" class="form-control" id="fieldName" placeholder="e.g., student_name">
+                </div>
+                <div class="form-group">
+                    <label for="fieldType">Field Type</label>
+                    <select class="form-control" id="fieldType">
+                        <option value="multi">Multiple Words</option>
+                        <option value="single_line">A Single Line of Text</option>
+                        <option value="single_word">A Single Word/ID</option>
+                        <option value="number">Number</option>
+                        <option value="date">Date</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="cancelField()">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="addField()">Save Field</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const image = new Image();
+    let fields = [];
+    let currentRect = null;
+    let drawing = false;
+    let lastHoveredField = null;
+    let selectedField = null;
+    let resizing = false;
+    let resizeHandle = null;
+
+    const handleRadius = 8;
+    const handleFill = '#007bff';
+    const handleStroke = 'white';
+
+    function getMousePos(canvas, evt) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+
+        return {
+            x: (evt.clientX - rect.left) * scaleX,
+            y: (evt.clientY - rect.top) * scaleY
+        };
+    }
+
+    image.onload = () => {
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        redraw();
+        fields = [];
+        updateFieldList();
+    };
+
+    document.getElementById('imageUpload').addEventListener('change', (e) => {
+        let file = e.target.files[0];
+        if (file) {
+            let reader = new FileReader();
+            reader.onload = (event) => { image.src = event.target.result; };
+            reader.readAsDataURL(file);
+        }
+    });
+
+    function isInsideHandle(x, y, handleX, handleY) {
+        const distance = Math.sqrt(Math.pow(x - handleX, 2) + Math.pow(y - handleY, 2));
+        return distance < handleRadius;
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+        if (!image.src) return;
+        const pos = getMousePos(canvas, e);
+
+        if (selectedField) {
+            const [x1, y1, x2, y2] = selectedField.coords;
+            const handles = [
+                { type: 'top-left', x: x1, y: y1 },
+                { type: 'top-right', x: x2, y: y1 },
+                { type: 'bottom-left', x: x1, y: y2 },
+                { type: 'bottom-right', x: x2, y: y2 }
+            ];
+
+            for (let handle of handles) {
+                if (isInsideHandle(pos.x, pos.y, handle.x, handle.y)) {
+                    resizing = true;
+                    resizeHandle = handle.type;
+                    return;
+                }
+            }
+        }
+
+        drawing = true;
+        selectedField = null;
+        currentRect = { startX: pos.x, startY: pos.y };
+        redraw();
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+        const pos = getMousePos(canvas, e);
+
+        if (drawing) {
+            redraw();
+            const { startX, startY } = currentRect;
+            ctx.strokeStyle = '#dc3545';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(startX, startY, pos.x - startX, pos.y - startY);
+            return;
+        }
+
+        if (resizing) {
+            let [x1, y1, x2, y2] = selectedField.coords;
+
+            switch (resizeHandle) {
+                case 'top-left':
+                    x1 = pos.x;
+                    y1 = pos.y;
+                    break;
+                case 'top-right':
+                    x2 = pos.x;
+                    y1 = pos.y;
+                    break;
+                case 'bottom-left':
+                    x1 = pos.x;
+                    y2 = pos.y;
+                    break;
+                case 'bottom-right':
+                    x2 = pos.x;
+                    y2 = pos.y;
+                    break;
+            }
+
+            selectedField.coords = [
+                Math.min(x1, x2), Math.min(y1, y2),
+                Math.max(x1, x2), Math.max(y1, y2)
+            ];
+            redraw();
+            return;
+        }
+
+        let hoveredField = null;
+        let cursorChanged = false;
+
+        for (const field of fields) {
+            const [x1, y1, x2, y2] = field.coords;
+            const handles = [
+                { x: x1, y: y1 }, { x: x2, y: y1 },
+                { x: x1, y: y2 }, { x: x2, y: y2 }
+            ];
+            for (let handle of handles) {
+                if (isInsideHandle(pos.x, pos.y, handle.x, handle.y)) {
+                    canvas.style.cursor = 'nwse-resize';
+                    cursorChanged = true;
+                    break;
+                }
+            }
+        }
+
+        if (!cursorChanged) {
+            for (const field of fields) {
+                const [x1, y1, x2, y2] = field.coords;
+                if (pos.x >= x1 && pos.x <= x2 && pos.y >= y1 && pos.y <= y2) {
+                    hoveredField = field;
+                    canvas.style.cursor = 'move';
+                    cursorChanged = true;
+                    break;
+                }
+            }
+        }
+
+        if (!cursorChanged) {
+             canvas.style.cursor = 'crosshair';
+        }
+
+        if (lastHoveredField !== hoveredField) {
+            lastHoveredField = hoveredField;
+            redraw();
+        }
+    });
+
+    canvas.addEventListener('mouseup', (e) => {
+        resizing = false;
+        if (drawing) {
+            drawing = false;
+            const pos = getMousePos(canvas, e);
+            const { startX, startY } = currentRect;
+
+            let x1 = Math.min(startX, pos.x);
+            let y1 = Math.min(startY, pos.y);
+            let x2 = Math.max(startX, pos.x);
+            let y2 = Math.max(startY, pos.y);
+
+            if (x2 - x1 < 10 || y2 - y1 < 10) { redraw(); return; }
+
+            currentRect = { x1, y1, x2, y2 };
+            $('#fieldName').val('');
+            $('#fieldModal').modal('show');
+        } else {
+            const pos = getMousePos(canvas, e);
+            let clickedField = null;
+            for (const field of fields) {
+                const [x1, y1, x2, y2] = field.coords;
+                if (pos.x >= x1 && pos.x <= x2 && pos.y >= y1 && pos.y <= y2) {
+                    clickedField = field;
+                    break;
+                }
+            }
+            if (clickedField) {
+                selectedField = clickedField;
+            } else {
+                selectedField = null;
+            }
+            redraw();
+        }
+        updateFieldList();
+    });
+
+    function redraw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (image.src) {
+            ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+        }
+
+        fields.forEach((field) => {
+            const [x1, y1, x2, y2] = field.coords;
+            ctx.strokeStyle = '#007bff';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        });
+
+        if (selectedField) {
+            const [x1, y1, x2, y2] = selectedField.coords;
+            ctx.strokeStyle = '#dc3545';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+            ctx.fillStyle = handleFill;
+            ctx.strokeStyle = handleStroke;
+            ctx.lineWidth = 2;
+
+            const handles = [
+                [x1, y1], [x2, y1],
+                [x1, y2], [x2, y2]
+            ];
+
+            handles.forEach(handle => {
+                ctx.beginPath();
+                ctx.arc(handle[0], handle[1], handleRadius, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.stroke();
+            });
+        }
+    }
+
+    function addField() {
+        let name = $('#fieldName').val().trim().replace(/\s+/g, '_');
+        let type = $('#fieldType').val();
+        if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) {
+            alert('Invalid field name. Use only letters, numbers, and underscores.');
+            return;
+        }
+
+        const originalCoords = [
+            Math.round(currentRect.x1),
+            Math.round(currentRect.y1),
+            Math.round(currentRect.x2),
+            Math.round(currentRect.y2)
+        ];
+
+        fields.push({ name, type, coords: originalCoords });
+        $('#fieldModal').modal('hide');
+        currentRect = null;
+        redraw();
+        updateFieldList();
+    }
+    function cancelField() {
+        currentRect = null;
+        $('#fieldModal').modal('hide');
+        redraw();
+    }
+
+    function getTemplateData() {
+        if (fields.length === 0) {
+            alert("No fields defined. Please draw at least one rectangle.");
+            return null;
+        }
+        return {
+            fields: fields.map(({ name, type, coords }) => ({ name, type, coords }))
+        };
+    }
+
+    function saveTemplate() {
+        const templateData = getTemplateData();
+        if (!templateData) return;
+        
+        const blob = new Blob([JSON.stringify(templateData, null, 4)], { type: 'application/json' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'template.json';
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        a.remove();
+    }
+
+    function saveTemplateToServer() {
+        const templateData = getTemplateData();
+        if (!templateData) return;
+
+        let templateName = prompt("Please enter a name for this template (e.g., 'degree_certificate'):");
+        if (!templateName || templateName.trim() === "") {
+            alert("Template name cannot be empty.");
+            return;
+        }
+        templateName = templateName.trim().replace(/\s+/g, '_');
+
+        fetch("{{ url_for('save_template') }}", {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: templateName, template_data: templateData })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert(data.message);
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        })
+        .catch(err => {
+            console.error("Error saving template to server:", err);
+            alert("An unexpected error occurred while saving the template.");
+        });
+    }
+
+    function updateFieldList() {
+        const listContainer = document.getElementById('field-list-container');
+        listContainer.innerHTML = '';
+        document.getElementById('field-count').textContent = `${fields.length} field${fields.length === 1 ? '' : 's'} defined.`;
+
+        fields.forEach((field, index) => {
+            const fieldItem = document.createElement('div');
+            fieldItem.className = 'field-list-item d-flex align-items-center mb-2';
+            fieldItem.style.cursor = 'pointer';
+
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = field.name;
+
+            const deleteButton = document.createElement('button');
+            deleteButton.className = 'btn btn-danger btn-sm delete-btn';
+            deleteButton.innerHTML = '<i class="fas fa-trash"></i>';
+            deleteButton.onclick = (e) => {
+                e.stopPropagation();
+                deleteField(index);
+            };
+
+            fieldItem.appendChild(nameSpan);
+            fieldItem.appendChild(deleteButton);
+            listContainer.appendChild(fieldItem);
+        });
+    }
+
+    function deleteField(index) {
+        fields.splice(index, 1);
+        if (selectedField === fields[index]) {
+            selectedField = null;
+        }
+        redraw();
+        updateFieldList();
+    }
+
+    function toggleFieldList() {
+        const fieldList = document.getElementById('field-list-section');
+        if (fieldList.style.display === 'none' || fieldList.style.display === '') {
+            fieldList.style.display = 'block';
+        } else {
+            fieldList.style.display = 'none';
+        }
+    }
+</script>
+{% endblock %}

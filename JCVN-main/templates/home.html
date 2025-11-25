@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Home | JCVN OCR{% endblock %}
+
+{% block content %}
+<div class="text-center" style="padding: 4rem 1rem;">
+    <h1 class="display-4">Welcome to JCVN OCR</h1>
+    <hr class="my-4">
+    <p>Choose an option below to get started.</p>
+    <div class="row justify-content-center mt-4">
+        <div class="col-md-4 mb-3">
+            <a href="{{ url_for('build_template_page') }}" class="btn btn-primary btn-lg btn-block p-4">
+                <i class="fas fa-drafting-compass fa-2x mb-2"></i><br>
+                Build a New Template
+            </a>
+        </div>
+        <div class="col-md-4 mb-3">
+            <a href="{{ url_for('extract_data_page') }}" class="btn btn-success btn-lg btn-block p-4">
+                <i class="fas fa-magic fa-2x mb-2"></i><br>
+                Extract Data from Image
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}
